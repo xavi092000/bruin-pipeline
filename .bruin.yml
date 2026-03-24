@@ -1,0 +1,11 @@
+default_environment: default
+environments:
+  default:
+    connections:
+      motherduck:
+        - name: duckdb-default
+      chess:
+        - name: chess-default
+          players:
+            - MagnusCarlsen
+            - Hikaru

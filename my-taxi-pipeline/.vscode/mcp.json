@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "bruin": {
+      "command": "bruin",
+      "args": ["mcp"]
+    }
+  }
+}

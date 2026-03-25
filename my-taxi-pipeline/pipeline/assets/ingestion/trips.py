@@ -1,4 +1,5 @@
-@bruin"""
+# @bruin
+"""
 name: ingestion.trips
 
 type: python

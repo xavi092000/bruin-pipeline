@@ -1,5 +1,4 @@
 @bruin"""
-print("TRIPS DEBUG VERSION 999")
 name: ingestion.trips
 
 type: python
@@ -11,8 +10,8 @@ connection: duckdb-default
 materialization:
   type: table
   strategy: create+replace
-
-@bruin"""
+"""
+print("TRIPS DEBUG VERSION 999")
 
 import json
 import os

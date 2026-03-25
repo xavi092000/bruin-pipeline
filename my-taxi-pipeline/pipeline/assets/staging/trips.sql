@@ -3,13 +3,13 @@ name: staging.trips
 type: duckdb.sql
 
 depends:
-  []
+  - ingestion.trips
+  - ingestion.payment_lookup
 
 materialization:
   type: table
-  strategy: time_interval
-  incremental_key: tpep_pickup_datetime
-  time_granularity: timestamp
+  strategy: create+replace
+ 
 @bruin */
 
 SELECT

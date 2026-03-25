@@ -10,7 +10,7 @@ connection: duckdb-default
 
 materialization:
   type: table
-  strategy: append
+  strategy: replace
 
 @bruin"""
 

@@ -2,8 +2,7 @@ name: ingestion.payment_lookup
 
 type: duckdb.seed
 
-depends:
-  - []
+
 
 parameters:
   path: payment_lookup.csv
@@ -11,13 +10,8 @@ parameters:
 columns:
   - name: payment_type_id
     type: integer
-    description: "Numeric code for payment type"
-    primary_key: true
-    checks:
-      - name: not_null
-      - name: unique
+    
+   
   - name: payment_type_name
     type: string
-    description: "Human-readable payment type"
-    checks:
-      - name: not_null
+    

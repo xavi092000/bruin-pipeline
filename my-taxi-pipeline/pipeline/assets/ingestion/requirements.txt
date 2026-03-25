@@ -1,1 +1,5 @@
 pandas
+pyarrow
+requests
+numpy
+python-dateutil

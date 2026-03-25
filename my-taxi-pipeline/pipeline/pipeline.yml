@@ -14,7 +14,10 @@ schedule: daily
 
 # TODO: Set the earliest date this pipeline should consider for full refresh backfills.
 # Format: YYYY-MM-DD
-start_date: "2022-01-01"
+start_date: "2024-01-01"
+
+concurrency: 1
+
 
 
 # TODO: Configure default connections so assets can omit explicit `connection: ...`.

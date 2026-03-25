@@ -10,6 +10,8 @@ materialization:
   type: table
   strategy: create+replace
 
+@bruin"""
+
 import json
 import os
 import tempfile
@@ -46,7 +48,6 @@ DEFAULT_COLUMNS = [
 
 
 def month_starts(start_date: str, end_date: str):
-    """Yield the first day of each month between start_date and end_date."""
     start = pd.Timestamp(start_date).replace(day=1)
     end = pd.Timestamp(end_date).replace(day=1)
 
@@ -57,7 +58,6 @@ def month_starts(start_date: str, end_date: str):
 
 
 def optimize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Optimize dataframe dtypes to reduce memory usage."""
     float_cols = df.select_dtypes(include=["float64"]).columns
     for col in float_cols:
         df[col] = pd.to_numeric(df[col], downcast="float")
@@ -69,72 +69,64 @@ def optimize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def download_to_tempfile(session: requests.Session, url: str) -> str | None:
-    """Download parquet file from URL to temporary file."""
+def download_to_tempfile(session: requests.Session, url: str):
+
     for attempt in range(3):
         try:
             response = session.get(url, stream=True, timeout=120)
             print(f"[ingestion.trips] GET {url} -> {response.status_code}")
-
         except Exception as e:
-            print(f"[ingestion.trips] retry download {e}")
+            print(f"[ingestion.trips] retry download: {e}")
             time.sleep(2)
             continue
 
+        # skip non-200 instead of crashing
         if response.status_code != 200:
             print(f"[ingestion.trips] skipping {url}")
             return None
 
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet")
 
-        for chunk in response.iter_content(8 * 1024 * 1024):
-            tmp.write(chunk)
+        for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
+            if chunk:
+                tmp.write(chunk)
 
         tmp.close()
-
         return tmp.name
 
     return None
 
 
-def read_parquet_chunked(path: str, columns: list[str]) -> pd.DataFrame:
-    """Read parquet file by row groups for memory efficiency."""
+def read_parquet_chunked(path: str, columns):
+
     parquet = pq.ParquetFile(path)
 
     dfs = []
 
     for i in range(parquet.num_row_groups):
         print(
-            f"[ingestion.trips] reading row group {i + 1}/{parquet.num_row_groups}"
+            f"[ingestion.trips] reading row group "
+            f"{i+1}/{parquet.num_row_groups}"
         )
 
         table = parquet.read_row_group(i, columns=columns)
         df = table.to_pandas()
+
         dfs.append(df)
 
     return pd.concat(dfs, ignore_index=True)
 
 
-def materialize() -> pd.DataFrame:
-    """Fetch and combine taxi trip data from multiple parquet files."""
-    try:
-        start_date = os.environ["BRUIN_START_DATE"]
-        end_date = os.environ["BRUIN_END_DATE"]
-    except KeyError as err:
-        raise RuntimeError(
-            "BRUIN_START_DATE and BRUIN_END_DATE must be set in the environment"
-        ) from err
+def materialize():
+
+    start_date = os.environ["BRUIN_START_DATE"]
+    end_date = os.environ["BRUIN_END_DATE"]
 
     print(f"[ingestion.trips] start={start_date}")
     print(f"[ingestion.trips] end={end_date}")
 
     bruin_vars = json.loads(os.environ.get("BRUIN_VARS", "{}"))
     taxi_types = bruin_vars.get("taxi_types", ["yellow"])
-
-    latest_available = (
-        pd.Timestamp.today().replace(day=1) - relativedelta(months=2)
-    )
-    print(f"[ingestion.trips] latest available: {latest_available.strftime('%Y-%m')}")
 
     session = requests.Session()
     session.headers.update(
@@ -148,11 +140,6 @@ def materialize() -> pd.DataFrame:
 
     for taxi_type in taxi_types:
         for month_start in month_starts(start_date, end_date):
-            if month_start > latest_available:
-                print(
-                    f"[ingestion.trips] skip recent: {month_start.strftime('%Y-%m')}"
-                )
-                continue
 
             year = month_start.year
             month = f"{month_start.month:02d}"
@@ -163,6 +150,7 @@ def materialize() -> pd.DataFrame:
             )
 
             path = download_to_tempfile(session, url)
+
             if path is None:
                 continue
 
@@ -175,8 +163,11 @@ def materialize() -> pd.DataFrame:
             df = optimize_dataframe(df)
 
             print(
-                f"[ingestion.trips] loaded {taxi_type} {year}-{month} shape={df.shape}"
+                f"[ingestion.trips] loaded "
+                f"{taxi_type} {year}-{month} "
+                f"shape={df.shape}"
             )
+
             dataframes.append(df)
 
     if not dataframes:
@@ -184,6 +175,7 @@ def materialize() -> pd.DataFrame:
         return pd.DataFrame()
 
     result = pd.concat(dataframes, ignore_index=True)
+
     print(f"[ingestion.trips] final shape: {result.shape}")
 
     return result

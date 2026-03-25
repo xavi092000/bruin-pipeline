@@ -80,7 +80,6 @@ def download_to_tempfile(session: requests.Session, url: str):
             time.sleep(2)
             continue
 
-        # skip non-200 instead of crashing
         if response.status_code != 200:
             print(f"[ingestion.trips] skipping {url}")
             return None
@@ -174,8 +173,24 @@ def materialize():
         print("[ingestion.trips] no data loaded")
         return pd.DataFrame()
 
-    result = pd.concat(dataframes, ignore_index=True)
+    result_df = pd.concat(dataframes, ignore_index=True)
 
-    print(f"[ingestion.trips] final shape: {result.shape}")
+    print(f"[ingestion.trips] final dataframe shape: {result_df.shape}")
+    print(f"[ingestion.trips] columns: {list(result_df.columns)}")
+    print(f"[ingestion.trips] dtypes:\n{result_df.dtypes}")
 
-    return result
+    print(f"[ingestion.trips] checking for NaN/inf values...")
+
+    nan_counts = result_df.isna().sum()
+    if nan_counts.sum() > 0:
+        print(f"[ingestion.trips] NaN counts per column:\n{nan_counts[nan_counts > 0]}")
+
+    inf_cols = []
+    for col in result_df.select_dtypes(include=[np.number]).columns:
+        if np.isinf(result_df[col]).any():
+            inf_cols.append(col)
+
+    if inf_cols:
+        print(f"[ingestion.trips] infinity values found in columns: {inf_cols}")
+
+    return result_df

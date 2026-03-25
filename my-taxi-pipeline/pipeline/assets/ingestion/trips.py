@@ -1,4 +1,3 @@
-
 name: ingestion.trips
 
 type: python
@@ -70,77 +69,52 @@ def optimize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def download_to_tempfile(session: requests.Session, url: str) -> str | None:
-    response = None
-
-    for attempt in range(1, 4):
+    """Download parquet file from URL to a temporary file."""
+    for attempt in range(3):
         try:
-            response = session.get(url, timeout=120, stream=True)
+            response = session.get(url, stream=True, timeout=120)
             print(f"[ingestion.trips] GET {url} -> {response.status_code}")
-        except Exception as ex:
-            print(f"[ingestion.trips] request error ({attempt}/3) for {url}: {ex}")
-            if attempt == 3:
-                raise
-            time.sleep(attempt * 2)
+        except Exception as e:
+            print(f"[ingestion.trips] retry download ({attempt + 1}/3): {e}")
+            time.sleep(2)
             continue
 
-        if response.status_code == 404:
-            print(f"[ingestion.trips] not found: {url} (skipping)")
+        if response.status_code != 200:
+            print(f"[ingestion.trips] skipping {url}")
             return None
 
-        if response.status_code == 403:
-            print(f"[ingestion.trips] forbidden ({attempt}/3): {url}")
-            if attempt == 3:
-                return None
-            time.sleep(attempt * 2)
-            continue
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet")
 
-        if response.status_code >= 500:
-            print(
-                f"[ingestion.trips] server error ({attempt}/3): "
-                f"{response.status_code} for {url}"
-            )
-            if attempt == 3:
-                return None
-            time.sleep(attempt * 2)
-            continue
+        for chunk in response.iter_content(8 * 1024 * 1024):
+            tmp.write(chunk)
 
-        response.raise_for_status()
-        break
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False)
-    tmp_path = tmp.name
-
-    try:
-        for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
-            if chunk:
-                tmp.write(chunk)
-    finally:
         tmp.close()
 
-    return tmp_path
+        return tmp.name
+
+    return None
 
 
-def read_parquet_lightweight(
-    parquet_path: str,
-    selected_columns: list[str] | None = None,
-):
-    parquet_file = pq.ParquetFile(parquet_path)
-    schema_names = parquet_file.schema.names
+def read_parquet_chunked(path: str, columns: list[str]) -> pd.DataFrame:
+    """Read parquet file by row groups to optimize memory usage."""
+    parquet = pq.ParquetFile(path)
 
-    if selected_columns:
-        columns = [c for c in selected_columns if c in schema_names]
-    else:
-        columns = schema_names
+    dfs = []
 
-    print(f"[ingestion.trips] reading columns: {columns}")
+    for i in range(parquet.num_row_groups):
+        print(f"[ingestion.trips] reading row group {i + 1}/{parquet.num_row_groups}")
 
-    table = parquet_file.read(columns=columns)
-    df = table.to_pandas()
+        table = parquet.read_row_group(i, columns=columns)
 
-    return df
+        df = table.to_pandas()
+
+        dfs.append(df)
+
+    return pd.concat(dfs, ignore_index=True)
 
 
-def materialize():
+def materialize() -> pd.DataFrame:
+    """Fetch and combine taxi trip data from URLs."""
     try:
         start_date = os.environ["BRUIN_START_DATE"]
         end_date = os.environ["BRUIN_END_DATE"]
@@ -149,36 +123,22 @@ def materialize():
             "BRUIN_START_DATE and BRUIN_END_DATE must be set in the environment"
         ) from err
 
-    print(f"[ingestion.trips] BRUIN_START_DATE={start_date}")
-    print(f"[ingestion.trips] BRUIN_END_DATE={end_date}")
+    print(f"[ingestion.trips] start_date: {start_date}")
+    print(f"[ingestion.trips] end_date: {end_date}")
 
     bruin_vars = json.loads(os.environ.get("BRUIN_VARS", "{}"))
     taxi_types = bruin_vars.get("taxi_types", ["yellow"])
-    selected_columns = bruin_vars.get("columns", DEFAULT_COLUMNS)
 
-    # Guard against unavailable recent months (2 month lag)
     latest_available = (
         pd.Timestamp.today().replace(day=1) - relativedelta(months=2)
     )
 
-    print(
-        "[ingestion.trips] latest expected available month:",
-        latest_available.strftime("%Y-%m"),
-    )
-
     session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "*/*",
-        }
-    )
 
     dataframes = []
 
     for taxi_type in taxi_types:
         for month_start in month_starts(start_date, end_date):
-
             if month_start > latest_available:
                 print(
                     f"[ingestion.trips] skipping unavailable month: "
@@ -194,29 +154,20 @@ def materialize():
                 f"{taxi_type}_tripdata_{year}-{month}.parquet"
             )
 
-            parquet_path = download_to_tempfile(session, url)
+            path = download_to_tempfile(session, url)
 
-            if parquet_path is None:
+            if path is None:
                 continue
 
             try:
-                df = read_parquet_lightweight(
-                    parquet_path=parquet_path,
-                    selected_columns=selected_columns,
-                )
+                df = read_parquet_chunked(path, DEFAULT_COLUMNS)
             finally:
-                try:
-                    os.remove(parquet_path)
-                except OSError:
-                    pass
+                os.remove(path)
 
             df["taxi_type"] = taxi_type
             df = optimize_dataframe(df)
 
-            print(
-                f"[ingestion.trips] loaded {taxi_type} {year}-{month} "
-                f"shape={df.shape}"
-            )
+            print(f"[ingestion.trips] loaded {taxi_type} {year}-{month} shape={df.shape}")
 
             dataframes.append(df)
 
@@ -224,24 +175,10 @@ def materialize():
         print("[ingestion.trips] no files loaded")
         return pd.DataFrame()
 
-    print(f"[ingestion.trips] concatenating {len(dataframes)} dataframe(s)...")
+    result = pd.concat(dataframes, ignore_index=True)
 
-    result_df = pd.concat(dataframes, ignore_index=True, copy=False)
-    result_df = optimize_dataframe(result_df)
+    print(f"[ingestion.trips] final shape: {result.shape}")
 
-    print(f"[ingestion.trips] final dataframe shape: {result_df.shape}")
-    print(f"[ingestion.trips] columns: {list(result_df.columns)}")
+    return result
 
-    nan_counts = result_df.isna().sum()
-    if nan_counts.sum() > 0:
-        print(f"[ingestion.trips] NaN counts:\n{nan_counts[nan_counts > 0]}")
 
-    inf_cols = []
-    for col in result_df.select_dtypes(include=[np.number]).columns:
-        if np.isinf(result_df[col]).any():
-            inf_cols.append(col)
-
-    if inf_cols:
-        print(f"[ingestion.trips] infinity columns: {inf_cols}")
-
-    return result_df

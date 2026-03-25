@@ -29,8 +29,8 @@ def month_starts(start_date: str, end_date: str):
     end = pd.Timestamp(end_date).replace(day=1)
 
     current = start
-    
     while current < end:
+        yield current
         current = current + relativedelta(months=1)
 
 

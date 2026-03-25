@@ -1,27 +1,17 @@
-"""@bruin
 
-name: ingestion.trips
-
-type: python
-
-image: python:3.11
-
-connection: duckdb-default
-
-materialization:
-  type: table
-  strategy: create+replace
-
-@bruin"""
+"""Trip ingestion helpers for the taxi pipeline."""
 
 import json
 import os
+import time
 from io import BytesIO
 
 import numpy as np
 import pandas as pd
 import requests
 from dateutil.relativedelta import relativedelta
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 def month_starts(start_date: str, end_date: str):
@@ -34,7 +24,83 @@ def month_starts(start_date: str, end_date: str):
         current = current + relativedelta(months=1)
 
 
-def materialize():
+def build_session() -> requests.Session:
+    session = requests.Session()
+
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        backoff_factor=2,
+        status_forcelist=[403, 429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False,
+    )
+
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Connection": "keep-alive",
+        }
+    )
+
+    return session
+
+
+def fetch_parquet(session: requests.Session, url: str) -> pd.DataFrame | None:
+    for attempt in range(1, 4):
+        try:
+            response = session.get(url, timeout=120)
+        except requests.RequestException as ex:
+            print(f"[ingestion.trips] request error ({attempt}/3) for {url}: {ex}")
+            if attempt == 3:
+                raise
+            time.sleep(attempt * 2)
+            continue
+
+        status = response.status_code
+        print(f"[ingestion.trips] GET {url} -> {status}")
+
+        if status == 404:
+            print(f"[ingestion.trips] not found: {url} (skipping)")
+            return None
+
+        if status == 403:
+            print(f"[ingestion.trips] forbidden ({attempt}/3) for {url}")
+            if attempt == 3:
+                response.raise_for_status()
+            time.sleep(attempt * 2)
+            continue
+
+        if status >= 500:
+            print(f"[ingestion.trips] server error ({attempt}/3) {status} for {url}")
+            if attempt == 3:
+                response.raise_for_status()
+            time.sleep(attempt * 2)
+            continue
+
+        response.raise_for_status()
+
+        try:
+            return pd.read_parquet(BytesIO(response.content))
+        except Exception as ex:
+            print(f"[ingestion.trips] parquet read error for {url}: {ex}")
+            raise
+
+    return None
+
+
+def materialize() -> pd.DataFrame:
     try:
         start_date = os.environ["BRUIN_START_DATE"]
         end_date = os.environ["BRUIN_END_DATE"]
@@ -47,6 +113,7 @@ def materialize():
     taxi_types = bruin_vars.get("taxi_types", ["yellow"])
 
     dataframes = []
+    session = build_session()
 
     for taxi_type in taxi_types:
         for month_start in month_starts(start_date, end_date):
@@ -54,43 +121,13 @@ def materialize():
             month = f"{month_start.month:02d}"
 
             url = (
-                f"https://d37ci6vzurychx.cloudfront.net/trip-data/"
+                "https://d37ci6vzurychx.cloudfront.net/trip-data/"
                 f"{taxi_type}_tripdata_{year}-{month}.parquet"
             )
 
-            attempt = 0
-            while attempt < 3:
-                attempt += 1
-                try:
-                    response = requests.get(url, timeout=60)
-                except Exception as ex:
-                    if attempt < 3:
-                        print(f"[ingestion.trips] request error ({attempt}/3) for {url}: {ex}")
-                        continue
-                    raise
-
-                if response.status_code == 404:
-                    print(f"[ingestion.trips] not found: {url} (skipping)")
-                    response = None
-                    break
-
-                if response.status_code >= 500:
-                    if attempt < 3:
-                        print(f"[ingestion.trips] server error ({attempt}/3) {response.status_code} for {url}")
-                        continue
-                    response.raise_for_status()
-
-                response.raise_for_status()
-                break
-
-            if response is None or response.status_code == 404:
+            df = fetch_parquet(session, url)
+            if df is None:
                 continue
-
-            try:
-                df = pd.read_parquet(BytesIO(response.content))
-            except Exception as ex:
-                print(f"[ingestion.trips] parquet read error for {url}: {ex}")
-                raise
 
             df["taxi_type"] = taxi_type
             dataframes.append(df)
@@ -100,31 +137,25 @@ def materialize():
         return pd.DataFrame()
 
     result_df = pd.concat(dataframes, ignore_index=True)
+
     print(f"[ingestion.trips] final dataframe shape: {result_df.shape}")
     print(f"[ingestion.trips] columns: {list(result_df.columns)}")
     print(f"[ingestion.trips] dtypes:\n{result_df.dtypes}")
-    
-    # Check for problematic data that might cause DuckDB load issues
-    print(f"[ingestion.trips] checking for NaN/inf values...")
+
     nan_counts = result_df.isna().sum()
-    if nan_counts.sum() > 0:
+    if nan_counts.any():
         print(f"[ingestion.trips] NaN counts per column:\n{nan_counts[nan_counts > 0]}")
-    
-    # Check for infinity values
-    inf_cols = []
-    for col in result_df.select_dtypes(include=[np.number]).columns:
-        if np.isinf(result_df[col]).any():
-            inf_cols.append(col)
+
+    inf_cols = [
+        col
+        for col in result_df.select_dtypes(include=[np.number]).columns
+        if np.isinf(result_df[col]).any()
+    ]
     if inf_cols:
         print(f"[ingestion.trips] infinity values found in columns: {inf_cols}")
-    
-    # Convert datetime columns to strings to avoid DuckDB timestamp issues
-    datetime_cols = result_df.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns
+
+    datetime_cols = result_df.select_dtypes(include=["datetime64[ns]", "datetimetz"]).columns
     if len(datetime_cols) > 0:
-        print(f"[ingestion.trips] converting datetime columns to strings: {list(datetime_cols)}")
-        for col in datetime_cols:
-            result_df[col] = result_df[col].astype(str)
-    
-    return {
-    "ingestion.trips": result_df
-}
+        print(f"[ingestion.trips] datetime columns detected: {list(datetime_cols)}")
+
+    return result_df

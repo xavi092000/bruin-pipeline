@@ -125,4 +125,6 @@ def materialize():
         for col in datetime_cols:
             result_df[col] = result_df[col].astype(str)
     
-    return result_df
+    return {
+    "trips": result_df
+}

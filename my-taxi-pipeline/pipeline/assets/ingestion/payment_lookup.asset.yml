@@ -3,7 +3,7 @@ name: ingestion.payment_lookup
 type: duckdb.seed
 
 depends:
-  - ingestion.trips
+  - []
 
 parameters:
   path: payment_lookup.csv

@@ -3,8 +3,7 @@ name: staging.trips
 type: duckdb.sql
 
 depends:
-  - ingestion.trips
-  - ingestion.payment_lookup
+  []
 
 materialization:
   type: table

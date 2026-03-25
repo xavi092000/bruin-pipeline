@@ -1,5 +1,6 @@
 """@bruin
-name: ingestion.trips
+
+name: test.hello
 
 type: python
 
@@ -18,7 +19,7 @@ import pandas as pd
 def materialize():
     return pd.DataFrame(
         {
-            "trip_id": [1, 2, 3],
-            "vendor_name": ["A", "B", "C"],
+            "id": [1, 2, 3],
+            "message": ["hello", "bruin", "test"],
         }
     )

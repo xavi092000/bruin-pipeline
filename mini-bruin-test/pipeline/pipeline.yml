@@ -1,0 +1,10 @@
+name: mini_test
+
+schedule: daily
+
+start_date: "2024-01-01"
+
+concurrency: 1
+
+default_connections:
+  duckdb: duckdb-default

@@ -11,7 +11,6 @@ materialization:
   type: table
   strategy: create+replace
 """
-print("TRIPS DEBUG VERSION 999")
 
 import json
 import os
@@ -20,8 +19,8 @@ import time
 
 import numpy as np
 import pandas as pd
-import requests
 import pyarrow.parquet as pq
+import requests
 from dateutil.relativedelta import relativedelta
 
 
@@ -71,13 +70,12 @@ def optimize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def download_to_tempfile(session: requests.Session, url: str):
-
     for attempt in range(3):
         try:
             response = session.get(url, stream=True, timeout=120)
             print(f"[ingestion.trips] GET {url} -> {response.status_code}")
-        except Exception as e:
-            print(f"[ingestion.trips] retry download: {e}")
+        except Exception as exc:
+            print(f"[ingestion.trips] retry download: {exc}")
             time.sleep(2)
             continue
 
@@ -87,39 +85,32 @@ def download_to_tempfile(session: requests.Session, url: str):
 
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet")
 
-        for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
-            if chunk:
-                tmp.write(chunk)
+        try:
+            for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
+                if chunk:
+                    tmp.write(chunk)
+        finally:
+            tmp.close()
 
-        tmp.close()
         return tmp.name
 
     return None
 
 
 def read_parquet_chunked(path: str, columns):
-
     parquet = pq.ParquetFile(path)
-
     dfs = []
 
     for i in range(parquet.num_row_groups):
-        print(
-            f"[ingestion.trips] reading row group "
-            f"{i+1}/{parquet.num_row_groups}"
-        )
-
+        print(f"[ingestion.trips] reading row group {i + 1}/{parquet.num_row_groups}")
         table = parquet.read_row_group(i, columns=columns)
         df = table.to_pandas()
-
         dfs.append(df)
 
     return pd.concat(dfs, ignore_index=True)
 
 
 def materialize():
-    raise RuntimeError("DEBUG_NEW_FILE")
-
     start_date = os.environ["BRUIN_START_DATE"]
     end_date = os.environ["BRUIN_END_DATE"]
 
@@ -141,7 +132,6 @@ def materialize():
 
     for taxi_type in taxi_types:
         for month_start in month_starts(start_date, end_date):
-
             year = month_start.year
             month = f"{month_start.month:02d}"
 
@@ -151,7 +141,6 @@ def materialize():
             )
 
             path = download_to_tempfile(session, url)
-
             if path is None:
                 continue
 
@@ -180,8 +169,7 @@ def materialize():
     print(f"[ingestion.trips] final dataframe shape: {result_df.shape}")
     print(f"[ingestion.trips] columns: {list(result_df.columns)}")
     print(f"[ingestion.trips] dtypes:\n{result_df.dtypes}")
-
-    print(f"[ingestion.trips] checking for NaN/inf values...")
+    print("[ingestion.trips] checking for NaN/inf values...")
 
     nan_counts = result_df.isna().sum()
     if nan_counts.sum() > 0:

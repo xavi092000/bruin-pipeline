@@ -126,5 +126,5 @@ def materialize():
             result_df[col] = result_df[col].astype(str)
     
     return {
-    "trips": result_df
+    "ingestion.trips": result_df
 }

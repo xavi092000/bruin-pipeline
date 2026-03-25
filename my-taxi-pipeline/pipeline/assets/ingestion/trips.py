@@ -118,6 +118,7 @@ def read_parquet_chunked(path: str, columns):
 
 
 def materialize():
+    raise RuntimeError("DEBUG_NEW_FILE")
 
     start_date = os.environ["BRUIN_START_DATE"]
     end_date = os.environ["BRUIN_END_DATE"]

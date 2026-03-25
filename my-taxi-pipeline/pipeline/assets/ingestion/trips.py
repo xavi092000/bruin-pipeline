@@ -1,3 +1,5 @@
+@bruin"""
+print("TRIPS DEBUG VERSION 999")
 name: ingestion.trips
 
 type: python

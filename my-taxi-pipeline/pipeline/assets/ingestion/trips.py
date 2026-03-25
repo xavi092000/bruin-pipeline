@@ -23,7 +23,6 @@ import pyarrow.parquet as pq
 from dateutil.relativedelta import relativedelta
 
 
-# Garde seulement les colonnes utiles pour un projet taxi analytics
 DEFAULT_COLUMNS = [
     "VendorID",
     "tpep_pickup_datetime",
@@ -48,6 +47,7 @@ DEFAULT_COLUMNS = [
 
 
 def month_starts(start_date: str, end_date: str):
+    """Yield the first day of each month between start_date and end_date."""
     start = pd.Timestamp(start_date).replace(day=1)
     end = pd.Timestamp(end_date).replace(day=1)
 
@@ -58,40 +58,13 @@ def month_starts(start_date: str, end_date: str):
 
 
 def optimize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    int_like_cols = [
-        "VendorID",
-        "passenger_count",
-        "RatecodeID",
-        "PULocationID",
-        "DOLocationID",
-        "payment_type",
-    ]
-    float_like_cols = [
-        "trip_distance",
-        "fare_amount",
-        "extra",
-        "mta_tax",
-        "tip_amount",
-        "tolls_amount",
-        "improvement_surcharge",
-        "total_amount",
-        "congestion_surcharge",
-        "Airport_fee",
-    ]
+    float_cols = df.select_dtypes(include=["float64"]).columns
+    for col in float_cols:
+        df[col] = pd.to_numeric(df[col], downcast="float")
 
-    for col in int_like_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int32")
-
-    for col in float_like_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce", downcast="float")
-
-    if "store_and_fwd_flag" in df.columns:
-        df["store_and_fwd_flag"] = df["store_and_fwd_flag"].astype("string")
-
-    if "taxi_type" in df.columns:
-        df["taxi_type"] = df["taxi_type"].astype("string")
+    int_cols = df.select_dtypes(include=["int64"]).columns
+    for col in int_cols:
+        df[col] = pd.to_numeric(df[col], downcast="integer")
 
     return df
 
@@ -117,7 +90,7 @@ def download_to_tempfile(session: requests.Session, url: str) -> str | None:
         if response.status_code == 403:
             print(f"[ingestion.trips] forbidden ({attempt}/3): {url}")
             if attempt == 3:
-                raise RuntimeError(f"403 Forbidden for {url}")
+                return None
             time.sleep(attempt * 2)
             continue
 
@@ -127,7 +100,7 @@ def download_to_tempfile(session: requests.Session, url: str) -> str | None:
                 f"{response.status_code} for {url}"
             )
             if attempt == 3:
-                response.raise_for_status()
+                return None
             time.sleep(attempt * 2)
             continue
 
@@ -150,8 +123,7 @@ def download_to_tempfile(session: requests.Session, url: str) -> str | None:
 def read_parquet_lightweight(
     parquet_path: str,
     selected_columns: list[str] | None = None,
-    max_rows: int | None = None,
-) -> pd.DataFrame:
+):
     parquet_file = pq.ParquetFile(parquet_path)
     schema_names = parquet_file.schema.names
 
@@ -165,10 +137,6 @@ def read_parquet_lightweight(
     table = parquet_file.read(columns=columns)
     df = table.to_pandas()
 
-    if max_rows is not None:
-        df = df.head(max_rows).copy()
-        print(f"[ingestion.trips] max_rows_per_file applied: {max_rows}")
-
     return df
 
 
@@ -181,10 +149,22 @@ def materialize():
             "BRUIN_START_DATE and BRUIN_END_DATE must be set in the environment"
         ) from err
 
+    print(f"[ingestion.trips] BRUIN_START_DATE={start_date}")
+    print(f"[ingestion.trips] BRUIN_END_DATE={end_date}")
+
     bruin_vars = json.loads(os.environ.get("BRUIN_VARS", "{}"))
     taxi_types = bruin_vars.get("taxi_types", ["yellow"])
     selected_columns = bruin_vars.get("columns", DEFAULT_COLUMNS)
-    max_rows_per_file = bruin_vars.get("max_rows_per_file")
+
+    # Guard against unavailable recent months (2 month lag)
+    latest_available = (
+        pd.Timestamp.today().replace(day=1) - relativedelta(months=2)
+    )
+
+    print(
+        "[ingestion.trips] latest expected available month:",
+        latest_available.strftime("%Y-%m"),
+    )
 
     session = requests.Session()
     session.headers.update(
@@ -198,6 +178,14 @@ def materialize():
 
     for taxi_type in taxi_types:
         for month_start in month_starts(start_date, end_date):
+
+            if month_start > latest_available:
+                print(
+                    f"[ingestion.trips] skipping unavailable month: "
+                    f"{month_start.strftime('%Y-%m')}"
+                )
+                continue
+
             year = month_start.year
             month = f"{month_start.month:02d}"
 
@@ -207,6 +195,7 @@ def materialize():
             )
 
             parquet_path = download_to_tempfile(session, url)
+
             if parquet_path is None:
                 continue
 
@@ -214,7 +203,6 @@ def materialize():
                 df = read_parquet_lightweight(
                     parquet_path=parquet_path,
                     selected_columns=selected_columns,
-                    max_rows=max_rows_per_file,
                 )
             finally:
                 try:
@@ -233,26 +221,27 @@ def materialize():
             dataframes.append(df)
 
     if not dataframes:
-        print("[ingestion.trips] no files loaded for given date range/taxi types")
+        print("[ingestion.trips] no files loaded")
         return pd.DataFrame()
 
     print(f"[ingestion.trips] concatenating {len(dataframes)} dataframe(s)...")
+
     result_df = pd.concat(dataframes, ignore_index=True, copy=False)
     result_df = optimize_dataframe(result_df)
 
     print(f"[ingestion.trips] final dataframe shape: {result_df.shape}")
     print(f"[ingestion.trips] columns: {list(result_df.columns)}")
-    print(f"[ingestion.trips] dtypes:\n{result_df.dtypes}")
 
     nan_counts = result_df.isna().sum()
     if nan_counts.sum() > 0:
-        print(f"[ingestion.trips] NaN counts per column:\n{nan_counts[nan_counts > 0]}")
+        print(f"[ingestion.trips] NaN counts:\n{nan_counts[nan_counts > 0]}")
 
     inf_cols = []
     for col in result_df.select_dtypes(include=[np.number]).columns:
         if np.isinf(result_df[col]).any():
             inf_cols.append(col)
+
     if inf_cols:
-        print(f"[ingestion.trips] infinity values found in columns: {inf_cols}")
+        print(f"[ingestion.trips] infinity columns: {inf_cols}")
 
     return result_df
